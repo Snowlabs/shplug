@@ -1,0 +1,115 @@
+#!/usr/bin/env sh
+
+# for testing we define vars locally
+SHPLUG_DIR=./_shplug/
+SHPLUG_SRC=./_shplug/src/
+SHPLUG_BIN=./bin/
+GIT_HOST="http://github.com"
+
+log() {
+    lvl="$1"; shift 1
+
+    echo "$0:$lvl: $*" >&2
+}
+
+err() {
+    log Err "$@"
+}
+
+have() {
+    command -v "$1" >/dev/null
+}
+
+spinner() {
+    frames='\|/-'
+    while sleep 0.15; do
+        frames=$(echo "$frames" | sed 's/\(.\)\(...\)/\2\1/')
+        frame=$(echo "$frames" | cut -c1)
+
+        printf "%s %s (%s)\\n" "$frame" "$1" "$2"
+    done &
+    pid=$!
+
+    wait "$2"
+    kill "$pid"
+    wait "$pid" 2>/dev/null
+}
+
+clone() {
+    sleep "$(echo "scale=9; $RANDOM*10/32767"|bc)" &
+    spinner "Cloning" $!
+
+    sleep "$(echo "scale=9; $RANDOM*10/32767"|bc)" &
+    spinner "Simulated process..." $!
+
+    echo "~ Simulated finish..."
+    # cd "$SHPLUG_SRC" && git clone "$1" 2>&1
+}
+
+register() {
+    if ! [ -n "$1" ]; then
+        err "missing git repository path!"
+        exit 1
+    else
+        git_path="$GIT_HOST/$1"
+        shift 1
+    fi
+
+    queue_entry="$git_path	&"
+
+    touch "$SHPLUG_DIR/queue"
+    echo "$queue_entry" >> "$SHPLUG_DIR/queue"
+}
+
+load() {
+    rm -rf "$SHPLUG_DIR/tmp/"
+    touch "$SHPLUG_DIR/queue"
+    mkdir -p "$SHPLUG_SRC"
+    mkdir -p "$SHPLUG_DIR/tmp/"
+
+    max_id=$(wc -l "$SHPLUG_DIR/queue" | cut -d' ' -f1)
+
+    for ii in $(seq 1 "$max_id"); do
+        # eval "stat_$ii=PLACEHOLDER_$ii"
+        # eval echo "\$stat_$ii"
+        echo "PLACEHOLDER_$ii"
+    done
+
+    {
+        id=
+        i=0
+        while read -r entry; do
+            i=$((i+1))
+            clone "$(echo "$entry" | cut -f1)" | sed -u "s/^/$i	/" &
+        done < "$SHPLUG_DIR/queue"
+    } | {
+        while read -r status; do
+            id=$(echo "$status" | cut -d '	' -f1)
+            status=$(echo "$status" | cut -d '	' -f2-)
+
+            cur_stat=$(printf "%s/%s .... %s" "$id" "$max_id" "$status")
+            # eval "stat_$id='$cur_stat'"
+
+            lines_up=$((max_id + 1 - id))
+
+            printf "\\033[%dA\\r\\033[0K%s\\r\\033[%dB" $lines_up "$cur_stat" $lines_up
+        done
+    }
+
+}
+
+if [ "$1" = "load" ]; then
+    if ! have git; then
+        err "command: \`git\` is missing!"
+        exit 1
+    fi
+    shift 1
+    load "$*"
+else
+    register "$*"
+fi
+
+
+
+
+
