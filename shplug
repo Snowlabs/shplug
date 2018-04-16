@@ -51,8 +51,11 @@ spinner() {
     pid=$!
 
     wait "$2"
+    exit_stat=$?
     kill "$pid"
     wait "$pid" 2>/dev/null
+    
+    return $exit_stat
 }
 
 clone() {
@@ -91,14 +94,20 @@ load() {
     queuefile="$SHPLUG_DIR/queue"
     logfile="$SHPLUG_DIR/log"
     touch "$queuefile"
+    rm -f "$logfile"
     touch "$logfile"
+    # if ! [ -p "$logfile" ]; then
+    #     rm -f "$logfile"
+    #     mkfifo "$logfile"
+    # fi
 
     max_id=$(wc -l "$queuefile" | cut -d' ' -f1)
 
-    for ii in $(seq 1 "$max_id"); do
+    for _ in $(seq 1 "$max_id"); do
         # eval "stat_$ii=PLACEHOLDER_$ii"
         # eval echo "\$stat_$ii"
-        echo "PLACEHOLDER_$ii"
+        # echo "PLACEHOLDER_$ii"
+        printf '\n'
     done
 
     {
@@ -106,46 +115,94 @@ load() {
         i=0
         while read -r entry; do
             i=$((i+1))
-            clone "$(echo "$entry" | cut -f1)" | sed -u "s/^/$i	/" 2>"$logfile" &
-            pid=$!
-            # {
-            #     if wait $pid; then
-            #         eval "exit_code_$i=0"
-            #     fi
-            # } &
+            {
+                { { { { clone "$(echo "$entry" | cut -f1)" || echo "FAIL:$i">>"$logfile"; } |
+                            sed -u "s/^/$i	/"; } 3>&1 1>&2 2>&3 3>&- | # apply sed to stdout
+                            sed -u "s/^/$i	/"; } 3>&1 1>&2 2>&3 3>&-   # apply sed to stderr
+                } 2>>"$logfile"; 
+
+                if ! grep -q "FAIL:$i" "$logfile"; then
+                    printf 'success	%s\n' "$i"
+                else
+                    printf 'fail	%s\n' "$i"
+                fi
+            } &
         done < "$queuefile"
     } | {
-        while read -r status; do
-            id=$(echo "$status" | cut -d '	' -f1)
-            status=$(echo "$status" | cut -d '	' -f2-)
+        log_len=0
+        padding=1
+        # for _ in $(seq 1 $padding); do printf '\n'; done
+        printf -- '  ────────────────\n'
 
-            cur_stat=$(printf "%s/%s .... %s" "$id" "$max_id" "$status")
-            # eval "stat_$id='$cur_stat'"
+        while IFS='	' read -r pre post; do
+                # id=$(echo "$status" | cut -d '	' -f1)
+                # status=$(echo "$status" | cut -d '	' -f2-)
+            if echo "$pre" | grep -Eq '^[0-9]+$'; then
+                id="$pre"; status="$post"
 
-            lines_up=$((max_id + 1 - id))
+                cur_stat=$(printf "%s/%s .... %s" "$id" "$max_id" "$status")
+                # eval "stat_$id='$cur_stat'"
 
-            printf "%s" "$(
-                cursor up $lines_up
-                printf "%s" "$cur_stat"
-                cursor clear end
-                cursor home
-                cursor down $lines_up
-            )"
+                lines_up=$(((max_id + 1 - id) + padding + log_len))
+
+                printf "%s" "$(
+                    cursor up $lines_up
+                    printf "%s" "$cur_stat"
+                    cursor clear end
+                    cursor home
+                    cursor down $lines_up
+                )"
+            else
+                exit_stat="$pre"; id="$post"
+
+                case "$exit_stat" in
+
+                    success)
+                        ;;
+
+                    fail)
+                        printf '%s failed:\n' "$id"
+                        log_len=$((log_len + 1))
+                        while read -r iid line; do
+                            if [ "$iid" = "$id" ]; then 
+                                printf '	%s\n' "$line"
+                                log_len=$((log_len + 1))
+                            fi
+                        done <"$logfile"
+                        ;;
+                esac
+            fi
         done
-    }
-
+    } 
 }
 
-if [ "$1" = "load" ]; then
-    if ! have git; then
-        err "command: \`git\` is missing!"
-        exit 1
-    fi
-    shift 1
-    load "$*"
-else
-    register "$*"
-fi
+case "$1" in
+    load)
+        if ! have git; then
+            err "command: \`git\` is missing!"
+            exit 1
+        fi
+        shift 1
+        load "$*"
+        ;;
+    clean)
+        rm -rf "$SHPLUG_SRC"
+        ;;
+    *)
+        register "$*"
+        ;;
+esac
+
+# if [ "$1" = "load" ]; then
+#     if ! have git; then
+#         err "command: \`git\` is missing!"
+#         exit 1
+#     fi
+#     shift 1
+#     load "$*"
+# else
+#     register "$*"
+# fi
 
 
 
