@@ -52,7 +52,7 @@ spinner() {
         frames=$(echo "$frames" | sed 's/\(.\)\(...\)/\2\1/')
         frame=$(echo "$frames" | cut -c1)
 
-        printf "%s %s (%s)\\n" "$frame" "$1" "$2"
+        printf '%s %s (%s)\n' "$frame" "$1" "$2"
     done &
     pid=$!
 
@@ -64,9 +64,34 @@ spinner() {
     return $exit_stat
 }
 
+# entry_get() {
+#     case "$1" in
+#         id)    index=1 ;;
+#         short) index=2 ;;
+#         url)   index=3 ;;
+#         *)   return 1 ;;
+#     esac
+
+#     echo "$2" | cut -f "$index"
+# }
+
+read_str() {
+    var="$1"; shift
+    read -r "$@" <<EOF
+$var
+EOF
+}
+
+parse_entry() { IFS='	' read_str "$@"; }
+
 clone() {
-    cd "$SHPLUG_SRC" && git clone "$1" 1>&2 &
-    if spinner "Cloning $1" $!; then
+    entry="$1"
+    parse_entry "$entry" id short_path url rest
+    # short_path="$(entry_get short "$entry")"
+    # url="$(entry_get url "$entry")"
+
+    cd "$SHPLUG_SRC" && git clone "$url" 1>&2 &
+    if spinner "Cloning $short_path" $!; then
         echo "Done clone!"
         return 0
     else
@@ -77,22 +102,27 @@ clone() {
 
 register() {
     mkdir -p "$SHPLUG_DIR"
+    queue_file="$SHPLUG_DIR/queue"
+    touch "$queue_file"
 
-    if ! [ -n "$1" ]; then
+    short_path="$1"
+
+    if ! [ -n "$short_path" ]; then
         err "missing git repository path!"
         exit 1
     else
-        git_path="$GIT_HOST/$1"
+        git_path="$GIT_HOST/$short_path"
         shift 1
-    fi
+    fi 
 
-    queue_entry="$git_path	&"
+    id="$(wc -l "$queue_file" | cut -d' ' -f1)"
+    id="$((id + 1))"
+    queue_entry="$id	$short_path	$git_path"
 
-    touch "$SHPLUG_DIR/queue"
-    echo "$queue_entry" >> "$SHPLUG_DIR/queue"
+    echo "$queue_entry" >> "$queue_file"
 }
 
-load() {
+run() {
     rm -rf "$SHPLUG_DIR/tmp/"
     mkdir -p "$SHPLUG_SRC"
     mkdir -p "$SHPLUG_DIR/tmp/"
@@ -103,6 +133,7 @@ load() {
     rm -f "$logfile"
     touch "$logfile"
 
+    task=$1; shift
     max_id=$(wc -l "$queuefile" | cut -d' ' -f1)
 
     for _ in $(seq 1 "$max_id"); do
@@ -115,12 +146,12 @@ load() {
         while read -r entry; do
             i=$((i+1))
             {
-                { { { { clone "$(echo "$entry" | cut -f1)" || echo "FAIL:$i">>"$logfile"; } |
+                { { { { eval "$task \"\$entry\" \"\$@\"" || echo "FAIL:$i">>"$logfile"; } |
                             sed_unbuf "s/^/$i	/"; } 3>&1 1>&2 2>&3 3>&- | # apply sed to stdout
                             sed_unbuf "s/^/$i	/"; } 3>&1 1>&2 2>&3 3>&-   # apply sed to stderr
-                } 2>>"$logfile"; 
+                } 2>>"$logfile";
 
-                if ! grep -q "FAIL:$i" "$logfile"; then
+                if ! grep -q "^FAIL:$i\$" "$logfile"; then
                     printf 'success	%s\n' "$i"
                 else
                     printf 'fail	%s\n' "$i"
@@ -136,8 +167,9 @@ load() {
         while IFS='	' read -r pre post; do
             if echo "$pre" | grep -Eq '^[0-9]+$'; then
                 id="$pre"; status="$post"
+                short_path="$(sed -n "${id}p" "$queuefile" | cut -f2)"
 
-                cur_stat=$(printf "%s/%s .... %s" "$id" "$max_id" "$status")
+                cur_stat=$(printf "(%s/%s) %-20s	%s" "$id" "$max_id" "$short_path" "$status")
                 # eval "stat_$id='$cur_stat'"
 
                 lines_up=$(((max_id + 1 - id) + padding + log_len))
@@ -151,6 +183,7 @@ load() {
                 )"
             else
                 exit_stat="$pre"; id="$post"
+                short_path="$(sed -n "${id}p" "$queuefile" | cut -f2)"
 
                 case "$exit_stat" in
 
@@ -158,10 +191,10 @@ load() {
                         ;;
 
                     fail)
-                        printf '%s failed:\n' "$id"
+                        printf '(%s) %s failed:\n' "$id" "$short_path"
                         log_len=$((log_len + 1))
                         while read -r iid line; do
-                            if [ "$iid" = "$id" ]; then 
+                            if [ "$iid" = "$id" ]; then
                                 printf '	%s\n' "$line"
                                 log_len=$((log_len + 1))
                             fi
@@ -174,13 +207,13 @@ load() {
 }
 
 case "$1" in
-    load)
+    run)
         if ! have git; then
             err "command: \`git\` is missing!"
             exit 1
         fi
         shift 1
-        load "$*"
+        run clone "$@"
         ;;
     clean)
         rm -rf "$SHPLUG_SRC"
