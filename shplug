@@ -37,9 +37,9 @@ cursor() {
         clear)
             mode=2
             case "$2" in
-                end) mode=0 ;;
+                end)   mode=0 ;;
                 start) mode=1 ;;
-                line) mode=2 ;;
+                line)  mode=2 ;;
             esac
 
             printf "\\033[%sK" "$mode";;
@@ -60,20 +60,20 @@ spinner() {
     exit_stat=$?
     kill "$pid"
     wait "$pid" 2>/dev/null
-    
+
     return $exit_stat
 }
 
-# entry_get() {
-#     case "$1" in
-#         id)    index=1 ;;
-#         short) index=2 ;;
-#         url)   index=3 ;;
-#         *)   return 1 ;;
-#     esac
+entry_get() {
+    case "$1" in
+        id)    index=1 ;;
+        short) index=2 ;;
+        url)   index=3 ;;
+        *)   return 1 ;;
+    esac
 
-#     echo "$2" | cut -f "$index"
-# }
+    echo "$2" | cut -f "$index"
+}
 
 read_str() {
     var="$1"; shift
@@ -82,15 +82,33 @@ $var
 EOF
 }
 
-parse_entry() { IFS='	' read_str "$@"; }
+# parse_entry() {
+#     entry="$1"
+#     IFS='	' read_str "$@";
+# }
+
+get_path() {
+    entry="$1"
+
+    echo "$SHPLUG_SRC/$(entry_get short "$entry" | sed 's/\//:/')"
+}
 
 clone() {
     entry="$1"
-    parse_entry "$entry" id short_path url rest
+    # parse_entry "$entry" id=id short_path=shpth url=url rest
     # short_path="$(entry_get short "$entry")"
-    # url="$(entry_get url "$entry")"
 
-    cd "$SHPLUG_SRC" && git clone "$url" 1>&2 &
+    url="$(entry_get url "$entry")"
+    path="$(get_path "$entry")"
+
+    if [ -d "$path" ]; then
+        echo "Directory: '$path' already exists!" >&2
+        return 1
+    fi
+    { mkdir "$path" && cd "$path" ;} ||
+        { echo "Directory creation failed!"; return 1; }
+
+    git clone "$url" ./ 1>&2 &
     if spinner "Cloning $short_path" $!; then
         echo "Done clone!"
         return 0
@@ -98,6 +116,60 @@ clone() {
         echo "Failed clone!"
         return 1
     fi
+}
+
+is_up_to_date() {
+    entry="$1"
+    path="$(get_path "$entry")"
+
+    cd "$path" || return 255
+    git fetch >&2 &
+    spinner "Fetching remote information..." $! ||
+        { echo "Error fetching remote info"; return 255; }
+
+    if [ "$(git rev-parse HEAD)" = "$(git rev-parse '@{u}')" ]; then
+        return 0
+    fi
+    return 1
+}
+
+fetch() {
+    entry="$1"
+    path="$(get_path "$entry")"
+
+    cd "$path" &&
+        { git fetch >&2 & spinner "Fetching remote information" $! ||
+            echo "Error fetching remoote info"; } &&
+        { git pull >&2 & spinner "Pulling changes..." $! &&
+            echo "Done pulling changes" ||
+            echo "Error pulling changes"; }
+}
+
+sync() {
+    entry="$1"
+    shift
+
+    force=$([ "${*#*--force}" != "$*" ] && echo 1)
+
+    url="$(entry_get url "$entry")"
+    short_name="$(entry_get short "$entry")"
+    id="$(entry_get id "$entry")"
+
+    echo "Synchronizing $short_name..."
+
+    ! [ -n "$force" ] && is_up_to_date "$entry"
+    exit_stat=$?
+
+
+    if [ $exit_stat -eq 0 ]; then
+        echo "$short_name is already up to date!"
+    elif [ $exit_stat -eq 1 ]; then
+        fetch "$entry"
+    else
+        echo "something went wrong..."
+        return 1
+    fi
+
 }
 
 register() {
@@ -176,8 +248,9 @@ run() {
 
                 printf "%s" "$(
                     cursor up $lines_up
+                    cursor clear line
                     printf "%s" "$cur_stat"
-                    cursor clear end
+                    # cursor clear end
                     cursor home
                     cursor down $lines_up
                 )"
@@ -213,13 +286,13 @@ case "$1" in
             exit 1
         fi
         shift 1
-        run clone "$@"
+        run "$@"
         ;;
     clean)
         rm -rf "$SHPLUG_SRC"
         ;;
     *)
-        register "$*"
+        register "$@"
         ;;
 esac
 
