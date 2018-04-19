@@ -4,7 +4,7 @@
 SHPLUG_DIR=./_shplug/
 SHPLUG_SRC=./_shplug/src/
 SHPLUG_BIN=./bin/
-GIT_HOST="http://github.com"
+GIT_HOST="https://github.com"
 
 log() {
     lvl="$1"; shift 1
@@ -93,7 +93,8 @@ get_path() {
     echo "$SHPLUG_SRC/$(entry_get short "$entry" | sed 's/\//:/')"
 }
 
-clone() {
+# subshell since it performs some `cd`s
+clone() (
     entry="$1"
     # parse_entry "$entry" id=id short_path=shpth url=url rest
     # short_path="$(entry_get short "$entry")"
@@ -101,11 +102,14 @@ clone() {
     url="$(entry_get url "$entry")"
     path="$(get_path "$entry")"
 
-    if [ -d "$path" ]; then
+    if [ -d "$path" ] && [ -n "$(ls -qAL -- "$path")" ]; then
         echo "Directory: '$path' already exists!" >&2
-        return 1
+        echo "Directory exists, assuming package already cloned..."
+        # return 1
+        return 0
     fi
-    { mkdir "$path" && cd "$path" ;} ||
+
+    { [ -d "$path" ] || mkdir "$path" && cd "$path"; } ||
         { echo "Directory creation failed!"; return 1; }
 
     git clone "$url" ./ 1>&2 &
@@ -116,9 +120,9 @@ clone() {
         echo "Failed clone!"
         return 1
     fi
-}
+)
 
-is_up_to_date() {
+is_up_to_date() (
     entry="$1"
     path="$(get_path "$entry")"
 
@@ -131,9 +135,9 @@ is_up_to_date() {
         return 0
     fi
     return 1
-}
+)
 
-fetch() {
+fetch() (
     entry="$1"
     path="$(get_path "$entry")"
 
@@ -143,7 +147,7 @@ fetch() {
         { git pull >&2 & spinner "Pulling changes..." $! &&
             echo "Done pulling changes" ||
             echo "Error pulling changes"; }
-}
+)
 
 sync() {
     entry="$1"
@@ -218,14 +222,16 @@ run() {
         while read -r entry; do
             i=$((i+1))
             {
-                { { { { eval "$task \"\$entry\" \"\$@\"" || echo "FAIL:$i">>"$logfile"; } |
-                            sed_unbuf "s/^/$i	/"; } 3>&1 1>&2 2>&3 3>&- | # apply sed to stdout
-                            sed_unbuf "s/^/$i	/"; } 3>&1 1>&2 2>&3 3>&-   # apply sed to stderr
+                { { { { eval "$task \"\$entry\" \"\$@\"" &&
+                            echo "SUCCESS:$i" >>"$logfile" ||
+                            echo "FAIL:$i"    >>"$logfile"; } |
+                        sed_unbuf "s/^/$i	/"; } 3>&1 1>&2 2>&3 3>&- | # apply sed to stdout
+                        sed_unbuf "s/^/$i	/"; } 3>&1 1>&2 2>&3 3>&-   # apply sed to stderr
                 } 2>>"$logfile";
 
-                if ! grep -q "^FAIL:$i\$" "$logfile"; then
+                if grep -q "^SUCCESS:$i\$" "$logfile"; then
                     printf 'success	%s\n' "$i"
-                else
+                elif grep -q "^FAIL:$i\$" "$logfile"; then
                     printf 'fail	%s\n' "$i"
                 fi
             } &
@@ -261,6 +267,10 @@ run() {
                 case "$exit_stat" in
 
                     success)
+                        if [ -n "$SHPLUG_DEBUG" ]; then
+                            printf '(%s) %s succeceeded\n' "$id" "$short_path"
+                            log_len=$((log_len + 1))
+                        fi
                         ;;
 
                     fail)
