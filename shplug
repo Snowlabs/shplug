@@ -199,15 +199,16 @@ register() {
 }
 
 run() {
-    rm -rf "$SHPLUG_DIR/tmp/"
+    rm -rf "$SHPLUG_DIR/tmp/*"
     mkdir -p "$SHPLUG_SRC"
     mkdir -p "$SHPLUG_DIR/tmp/"
 
     queuefile="$SHPLUG_DIR/queue"
     logfile="$SHPLUG_DIR/log"
     touch "$queuefile"
-    rm -f "$logfile"
-    touch "$logfile"
+    # rm -f "$logfile"
+    # touch "$logfile"
+    printf '' >"$logfile"
 
     task=$1; shift
     max_id=$(wc -l "$queuefile" | cut -d' ' -f1)
@@ -225,29 +226,39 @@ run() {
                 { { { { eval "$task \"\$entry\" \"\$@\"" &&
                             echo "SUCCESS:$i" >>"$logfile" ||
                             echo "FAIL:$i"    >>"$logfile"; } |
-                        sed_unbuf "s/^/$i	/"; } 3>&1 1>&2 2>&3 3>&- | # apply sed to stdout
-                        sed_unbuf "s/^/$i	/"; } 3>&1 1>&2 2>&3 3>&-   # apply sed to stderr
+                        sed_unbuf "s/^/$i	stat	/"; } 3>&1 1>&2 2>&3 3>&- | # sed to stdout
+                        sed_unbuf "s/^/$i	/"; } 3>&1 1>&2 2>&3 3>&-   # sed to stderr
                 } 2>>"$logfile";
 
-                if grep -q "^SUCCESS:$i\$" "$logfile"; then
-                    printf 'success	%s\n' "$i"
-                elif grep -q "^FAIL:$i\$" "$logfile"; then
-                    printf 'fail	%s\n' "$i"
-                fi
+                {
+                    short_path="$(sed -n "${i}p" "$queuefile" | cut -f2)"
+                    if grep -q "^SUCCESS:$i\$" "$logfile" && [ -n "$SHPLUG_DEBUG" ]; then
+                        printf '(%s) %s succeceeded\n' "$i" "$short_path"
+                        sed -n 's/'"$i"'	\(.*\)/	\1/p' < "$logfile"
+                    elif grep -q "^FAIL:$i\$" "$logfile"; then
+                        printf '(%s) %s failed:\n' "$i" "$short_path"
+                        sed -n 's/'"$i"'	\(.*\)/	\1/p' < "$logfile"
+                    fi
+                } | sed "s/^/$i	log	/"
             } &
-        done < "$queuefile"
+        done <<-EOF
+        $(cat "$queuefile")
+EOF
     } | {
         log_len=0
         padding=1
         # for _ in $(seq 1 $padding); do printf '\n'; done
         printf -- '  ────────────────\n'
 
-        while IFS='	' read -r pre post; do
-            if echo "$pre" | grep -Eq '^[0-9]+$'; then
-                id="$pre"; status="$post"
+        while IFS='	' read -r line; do
+            id="$(echo "$line" | cut -f1)"
+            mode="$(echo "$line" | cut -f2)"
+            msg="$(echo "$line" | cut -f3-)"
+
+            if [ "$mode" = stat ]; then
                 short_path="$(sed -n "${id}p" "$queuefile" | cut -f2)"
 
-                cur_stat=$(printf "(%s/%s) %-20s	%s" "$id" "$max_id" "$short_path" "$status")
+                cur_stat=$(printf "(%s/%s) %-20s	%s" "$id" "$max_id" "$short_path" "$msg")
                 # eval "stat_$id='$cur_stat'"
 
                 lines_up=$(((max_id + 1 - id) + padding + log_len))
@@ -260,30 +271,9 @@ run() {
                     cursor home
                     cursor down $lines_up
                 )"
-            else
-                exit_stat="$pre"; id="$post"
-                short_path="$(sed -n "${id}p" "$queuefile" | cut -f2)"
-
-                case "$exit_stat" in
-
-                    success)
-                        if [ -n "$SHPLUG_DEBUG" ]; then
-                            printf '(%s) %s succeceeded\n' "$id" "$short_path"
-                            log_len=$((log_len + 1))
-                        fi
-                        ;;
-
-                    fail)
-                        printf '(%s) %s failed:\n' "$id" "$short_path"
-                        log_len=$((log_len + 1))
-                        while read -r iid line; do
-                            if [ "$iid" = "$id" ]; then
-                                printf '	%s\n' "$line"
-                                log_len=$((log_len + 1))
-                            fi
-                        done <"$logfile"
-                        ;;
-                esac
+            elif [ "$mode" = log ]; then
+                printf '%s\n' "$msg"
+                log_len=$((log_len + 1))
             fi
         done
     }
