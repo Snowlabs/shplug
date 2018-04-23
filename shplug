@@ -4,7 +4,20 @@
 SHPLUG_DIR=./_shplug/
 SHPLUG_SRC=./_shplug/src/
 SHPLUG_BIN=./bin/
-GIT_HOST="https://github.com"
+
+have() {
+    [ -n "$(command -v "$1")" ]
+}
+
+http_get() {
+    { have wget && wget -qO- "$1"; } ||
+    { have curl && curl -s "$1"; }
+}
+
+http_download() {
+    { have wget && wget -q "$1"; } ||
+    { have curl && curl -sO "$1"; }
+}
 
 log() {
     lvl="$1"; shift 1
@@ -64,12 +77,53 @@ spinner() {
     return $exit_stat
 }
 
+get_download_url() {
+    short_path="$(entry_get short "$1")"
+    from="$(entry_get from "$1")"
+    case "$(entry_get from "$1")" in
+        gh)
+            printf 'https://github.com/%s' "$short_path"
+            ;;
+        gh-r)
+            http_get "https://api.github.com/repos/$short_path/releases" |
+                grep browser_download_url |
+                grep "$(entry_get use "$1")" |
+                head -n1 |
+                cut -d\" -f4
+            ;;
+        *)
+            echo "Unknown source: '$from'" >&2
+            return 1
+            ;;
+    esac
+}
+
+get_path() {
+    entry="$1"
+
+    echo "$SHPLUG_SRC/$(entry_get short "$entry" | sed 's/\//:/')"
+}
+
 entry_get() {
+
     case "$1" in
         id)    index=1 ;;
         short) index=2 ;;
-        url)   index=3 ;;
-        *)   return 1 ;;
+        from)  index=3 ;;
+        use)   index=4 ;;
+        at)    index=5 ;;
+
+        url)
+            get_download_url "$2"
+            return $?
+            ;;
+        path)
+            get_path "$2"
+            return $?
+            ;;
+        *)
+            return 1
+            ;;
     esac
 
     echo "$2" | cut -f "$index"
@@ -87,10 +141,10 @@ EOF
 #     IFS='	' read_str "$@";
 # }
 
-get_path() {
+is_cloned() {
     entry="$1"
-
-    echo "$SHPLUG_SRC/$(entry_get short "$entry" | sed 's/\//:/')"
+    path="$(entry_get path "$entry")"
+    [ -d "$path" ] && [ -n "$(ls -qAL -- "$path")" ]
 }
 
 # subshell since it performs some `cd`s
@@ -100,9 +154,9 @@ clone() (
     # short_path="$(entry_get short "$entry")"
 
     url="$(entry_get url "$entry")"
-    path="$(get_path "$entry")"
+    path="$(entry_get path "$entry")"
 
-    if [ -d "$path" ] && [ -n "$(ls -qAL -- "$path")" ]; then
+    if is_cloned "$entry"; then
         echo "Directory: '$path' already exists!" >&2
         echo "Directory exists, assuming package already cloned..."
         # return 1
@@ -112,7 +166,15 @@ clone() (
     { [ -d "$path" ] || mkdir "$path" && cd "$path"; } ||
         { echo "Directory creation failed!"; return 1; }
 
-    git clone "$url" ./ 1>&2 &
+    case "$(entry_get from "$entry")" in
+        gh)
+            git clone "$url" ./ 1>&2
+            ;;
+        gh-r)
+            http_download "$url" 1>&2
+            ;;
+    esac &
+
     if spinner "Cloning $short_path" $!; then
         echo "Done clone!"
         return 0
@@ -121,6 +183,15 @@ clone() (
         return 1
     fi
 )
+
+# install() {
+#     entry="$1"
+
+
+#     if clone "$entry"; then
+
+#     fi
+# }
 
 is_up_to_date() (
     entry="$1"
@@ -155,25 +226,36 @@ sync() {
 
     force=$([ "${*#*--force}" != "$*" ] && echo 1)
 
-    url="$(entry_get url "$entry")"
     short_name="$(entry_get short "$entry")"
-    id="$(entry_get id "$entry")"
 
     echo "Synchronizing $short_name..."
 
-    ! [ -n "$force" ] && is_up_to_date "$entry"
-    exit_stat=$?
-
-
-    if [ $exit_stat -eq 0 ]; then
-        echo "$short_name is already up to date!"
-    elif [ $exit_stat -eq 1 ]; then
-        fetch "$entry"
+    if ! is_cloned "$entry"; then
+        clone "$entry"
     else
-        echo "something went wrong..."
-        return 1
+        ! [ -n "$force" ] && is_up_to_date "$entry"
+        exit_stat=$?
+
+
+        if [ $exit_stat -eq 0 ]; then
+            echo "$short_name is already up to date!"
+        elif [ $exit_stat -eq 1 ]; then
+            fetch "$entry"
+        else
+            echo "something went wrong..."
+            return 1
+        fi
     fi
 
+}
+
+get_param() {
+    param="$(echo "$1" | sed -n 's/^.*[[:space:]]\+'"$2"':\([[:alnum:]-]\+\)/\1/p')"
+    if [ -z "$param" ]; then
+        return 1
+    else
+        echo "$param"
+    fi
 }
 
 register() {
@@ -182,18 +264,18 @@ register() {
     touch "$queue_file"
 
     short_path="$1"
+    from="$(get_param "$*" from || echo gh)"
+    use="$(get_param "$*" use || echo 'linux.*64')"
+    at="$(get_param "$*" at || echo latest)"
 
     if ! [ -n "$short_path" ]; then
-        err "missing git repository path!"
+        err "missing repository url!"
         exit 1
-    else
-        git_path="$GIT_HOST/$short_path"
-        shift 1
-    fi 
+    fi
 
     id="$(wc -l "$queue_file" | cut -d' ' -f1)"
     id="$((id + 1))"
-    queue_entry="$id	$short_path	$git_path"
+    queue_entry="$id	$short_path	$from	$use	$at"
 
     echo "$queue_entry" >> "$queue_file"
 }
