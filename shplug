@@ -1,18 +1,41 @@
 #!/usr/bin/env sh
 
-RED='\033[91m'
-GRN='\033[92m'
-RST='\033[0m'
+### Environment configuration
 
-# for testing we define vars locally
-SHPLUG_DIR="$PWD"/_shplug/
-SHPLUG_SRC="$PWD"/_shplug/src/
-SHPLUG_BIN="$PWD"/_shplug/bin/
+# $SHPLUG_HOME is handled by init.sh
+if [ -z "$SHPLUG_HOME" ]; then
+    echo '$SHPLUG_HOME has not been exported. Aborting.' >&2
+    exit 1
+fi
 
-QDELIM='	|||	'
+readonly SHPLUG_BIN="$SHPLUG_HOME"/bin # user programs
+readonly SHPLUG_DB="$SHPLUG_HOME"/db
 
+readonly COLOUR_RED='\033[91m'
+readonly COLOUR_GREEN='\033[92m'
+readonly COLOUR_RESET='\033[0m'
+
+### Utility functions
 have() {
-    [ -n "$(command -v "$1")" ]
+    command -v "$1" >/dev/null
+}
+
+err() {
+    echo "$@" >&2
+}
+
+success() {
+    printf '%s%s%s\n' "$COLOUR_GREEN" "$*" "$COLOUR_RESET"
+}
+
+failure() {
+    printf '%s%s%s\n' "$COLOUR_RED" "$*" "$COLOUR_RESET"
+}
+
+sed_unbuf() {
+    while read -r line; do
+        echo "$line" | sed "$@"
+    done
 }
 
 http_get() {
@@ -25,30 +48,12 @@ http_download() {
     { have curl && curl -sO "$1"; }
 }
 
-log() {
-    lvl="$1"; shift 1
-
-    echo "$0:$lvl: $*" >&2
-}
-
-err() {
-    log Err "$@"
-}
-
-have() {
-    command -v "$1" >/dev/null
-}
-
-sed_unbuf() {
-    while read -r line; do
-        echo "$line" | sed "$@"
-    done
-}
-
+# Pipe to two programs at once
+# stderr goes into $ERR and stdout into $OUT
+# NOTE: UNUSED
 fd_apply() {
     {
         eval "$@" 3>&1 1>&2 2>&3 |
-
         eval "${ERR:-cat}"
 
     } 3>&1 1>&2 2>&3 3>&- |
@@ -76,6 +81,7 @@ cursor() {
     esac
 }
 
+# NOTE: UNUSED
 escape_rgx() {
     echo "$1" | sed 's/[^^]/[&]/g; s/\^/\\^/g'
 }
@@ -94,7 +100,6 @@ extract__tgz() {
 
     mkdir -p "$target_path"
     tar -xvzf "$archive_path" -C "$target_path"
-
 }
 
 spinner() {
@@ -103,7 +108,7 @@ spinner() {
         frames=$(echo "$frames" | sed 's/\(.\)\(...\)/\2\1/')
         frame=$(echo "$frames" | cut -c1)
 
-        printf '%s %s (%s)\n' "$frame" "$1" "$2"
+        printf '%s %s\n' "$frame" "$1"
     done &
     pid=$!
 
@@ -115,68 +120,26 @@ spinner() {
     return $exit_stat
 }
 
-entry_get_download_url() {
-    short_path="$(entry_get short)"
-    from="$(entry_get from)"
-    case "$(entry_get from)" in
-        gh)
-            printf 'https://github.com/%s' "$short_path"
-            ;;
-        gh-r)
-            http_get "https://api.github.com/repos/$short_path/releases" |
-                grep browser_download_url |
-                grep "$(entry_get use)" |
-                head -n1 |
-                cut -d\" -f4
-            ;;
-        *)
-            echo "Unknown source: '$from'" >&2
-            return 1
-            ;;
-    esac
-}
-
-entry_get_path() {
-    # entry="$1"
-    id="$(entry_get id)"
-    short="$(entry_get short)"
-
-    echo "$SHPLUG_SRC/$id.$(echo "$short" | sed 's/\//./')"
-}
-
 entry_get() {
-    [ -n "$ENTRY" ] || { echo "entry is null" >&2; return 255; }
+    param="$1"
+    entry="$ENTRY"
 
-    case "$1" in
-        id)         index=1 ;;
-        short)      index=2 ;;
-        from)       index=3 ;;
-        use)        index=4 ;;
-        rename-to)  index=5 ;;
-        at)         index=6 ;;
-        hook-build) index=7 ;;
-
-        url)
-            entry_get_download_url
-            return $?
+    case "$param" in
+        short|from|use|at|post|url|path)
+            . "$entry"
+            eval "echo \"\$$param\""
             ;;
-        path)
-            entry_get_path
-            return $?
+        rename-to)
+            . "$entry"
+            echo "$rename_to"
+            ;;
+        entry-path)
+            dirname "$entry"
             ;;
         *)
             return 1
             ;;
     esac
-
-    # echo "$2" | cut -d"$QDELIM" -f "$index"
-    printf -- '%s\n' "$ENTRY" |
-    awk                            \
-        -F "$(
-                echo "$QDELIM" |
-                sed 's/|/\\\\|/g'
-            )"                     \
-        '{$0=$'"$index"'}1'
 }
 
 read_str() {
@@ -189,70 +152,53 @@ EOF
 forward_fun() {
     fun="$1"; shift 1
 
-    # entry="$1"
     from="$(entry_get from)"
     eval "$(echo "$from" | sed 's/-/_/')__${fun} \"\$@\""
 }
 
-# parse_entry() {
-#     entry="$1"
-#     IFS='	' read_str "$@";
-# }
-
 is_cloned() {
-    # entry="$1"
     path="$(entry_get path)"
     [ -d "$path" ] && [ -n "$(ls -qAL -- "$path")" ]
 }
 
 # subshell since it performs some `cd`s
 clone() (
-    # entry="$1"
-    # parse_entry "$entry" id=id short_path=shpth url=url rest
-    # short_path="$(entry_get short "$entry")"
-
     url="$(entry_get url)"
     path="$(entry_get path)"
 
-    if is_cloned "$ENTRY"; then
-        echo "Directory: '$path' already exists!" >&2
-        echo "Directory exists, assuming package already cloned..."
-        # return 1
+    if is_cloned; then
+        err "Directory: '$path' already exists!"
+        err "Assuming package has already been cloned"
+        success "Already cloned"
         return 0
-    fi
+    fi 
 
-    { [ -d "$path" ] || mkdir "$path" && cd "$path"; } ||
-        { echo "Directory creation failed!"; return 1; }
+    if ! mkdir -p "$path" && cd "$path"; then
+        err "Failed to create directory '$path'"
+        failure "Directory creation failed"
+        return 1
+    fi
 
     case "$(entry_get from)" in
         gh)
-            git clone "$url" ./ 1>&2
+            git clone "$url" "$path" >&2
             ;;
         gh-r)
-            http_download "$url" 1>&2
+            http_download "$url" >&2
             ;;
     esac &
 
     if spinner "Cloning $short_path" $!; then
-        echo "Done clone!"
+        success "Done clone"
         return 0
     else
-        echo "Failed clone!"
+        failure "Failed clone"
         return 1
     fi
 )
 
-# install() {
-#     entry="$1"
-
-
-#     if clone "$entry"; then
-
-#     fi
-# }
-
 is_up_to_date() (
-    forward_fun is_up_to_date "$@"
+    forward_fun is_up_to_date
 )
 
 gh__is_up_to_date() {
@@ -277,7 +223,6 @@ gh_r__is_up_to_date() {
 fetch() ( forward_fun fetch "$@"; )
 
 gh__fetch() {
-    # entry="$1"
     path="$(entry_get_path)"
     at="$(entry_get at)"
 
@@ -301,7 +246,6 @@ gh__fetch() {
 }
 
 gh_r__fetch() {
-    # entry="$1"
     path="$(entry_get_path)"
 
     rm -rf "$path"
@@ -310,8 +254,6 @@ gh_r__fetch() {
 
 sync() {
     [ -n "$ENTRY" ] || { echo "entry is null" >&2; return 255; }
-    # entry="$1"
-    # shift
 
     force=$([ "${*#*--force}" != "$*" ] && echo 1)
 
@@ -322,7 +264,7 @@ sync() {
     if ! is_cloned; then
         clone
     else
-        [ -z "$force" ] && is_up_to_date #"$ENTRY"
+        [ -z "$force" ] && is_up_to_date
         exit_stat=$?
 
 
@@ -408,21 +350,12 @@ gh__install() (
                 fi
 
             done
-    # else
-    #     # we want globbing!
-    #     __p="$PWD/$pat"
-    #     echo $__p >&2
-    #     # shellcheck disable=SC2086
-    #     ln -s $__p "$SHPLUG_BIN" >&2 ||
-    #         return 255
-    # fi
 
     echo "Done installation"
 )
 
 get_param() {
-    # param="$(echo "$1" | sed -n 's/^.*[[:space:]]\+'"$2"':\([[:alnum:]-]\+\)/\1/p')"
-    tag=$1; shift 1
+    tag="$1"; shift 1
     for arg in "$@"; do
         param="$(echo "$arg" | sed -n 's/^'"$tag"':\(.*\)$/\1/p')"
         if [ -n "$param" ]; then
@@ -431,182 +364,185 @@ get_param() {
         fi
     done
     return 1
-    # param="$(echo "$1" | sed -n 's/^.*[[:space:]]\+'"$2"':\([^[:space:]]\+\).*$/\1/p')"
-    # if [ -z "$param" ]; then
-    #     return 1
-    # else
-    #     echo "$param"
-    # fi
 }
 
 register() {
-    mkdir -p "$SHPLUG_DIR"
-    queue_file="$SHPLUG_DIR/queue"
-    touch "$queue_file"
-
-    short_path="$1"
+    short_path="$1"; shift
 
     if [ -z "$short_path" ]; then
         err "missing repository url!"
         exit 1
     fi
 
-    from="$(
-        get_param from "$@" || echo gh
-        )"
+    from="$(      get_param from       "$@" || echo gh)"
+    rename_to="$( get_param rename-to  "$@" || :)"
+    at="$(        get_param at         "$@" || echo latest)"
+    post="$(      get_param hook-build "$@" || echo :)"
 
-    use="$(
-        get_param use "$@" ||
-        {
-            case "$from" in
-                gh)   echo '\[^/\]*\.sh';;
-                gh-r) echo 'linux.*64';;
-            esac
-        })"
+    case "$from" in
+        gh)
+            use='\[^/\]*\.sh'
+            url="https://github.com/$short_path"
+            ;;
+        gh-r)
+            use='linux.*64'
+            url="https://api.github.com/repos/$short_path/releases"
+            ;;
+    esac
 
-    rename_to="$(
-        get_param rename-to "$@" || :
-        )"
+    entry_path="$SHPLUG_DB/$short_path"
+    mkdir -p "$entry_path"
 
-    at="$(
-        get_param at "$@" ||
-        echo latest
-        )"
-
-    hook_build="$(
-        get_param hook-build "$@" ||
-        echo :
-        )"
-
-    id="$(wc -l "$queue_file" | cut -d' ' -f1)"
-    id="$((id + 1))"
-    # queue_entry="$id	$short_path	$from	,|,	$use	,|,	$at	,|,	$hook_build"
-
-    queue_entry="$(
-        printf '%s%s%s%s%s%s%s%s%s%s%s' \
-            "$id"         "$QDELIM"     \
-            "$short_path" "$QDELIM"     \
-            "$from"       "$QDELIM"     \
-            "$use"        "$QDELIM"     \
-            "$rename_to"  "$QDELIM"     \
-            "$at"         "$QDELIM"     \
-            "$hook_build"               \
-        )"
-
-    echo "$queue_entry" >> "$queue_file"
+cat << EOF > "$entry_path/ENTRY"
+use='$use'
+from='$from'
+rename_to='$rename_to'
+at='$at'
+post='$post'
+short='$short_path'
+url='$url'
+path='$entry_path/repo'
+EOF
 }
 
+# Task runs the given task for the provided $ENTRY.
+# All output of task must be prefixed by $out_prefix,
+# that is, the id, and the current $ENTRY.
+# This is so that the caller of task can properly handle
+# task's output.
 task() {
-    id="$1"
-    task="$2"
-    shift 2
+    task="$1"; shift
 
-    OUT="sed_unbuf 's/^/$id	stat	/'"          \
-    ERR="sed_unbuf 's/^/$id	/'"                  \
-        fd_apply                                 \
-            eval "$task" "$@"               "&&" \
-            echo "SUCCESS:$id" ">>$LOGFILE" "||" \
-            echo "FAIL:$id"    ">>$LOGFILE"      \
-        2>>"$LOGFILE"
+    # get name for logfile
+    entry_path="$(entry_get entry-path)"
+    logfile="$entry_path/err.log"
 
-    {
-        short_path="$(entry_get short)"
-        succ="$(grep -q "^SUCCESS:$id\$" "$LOGFILE" && echo t)"
-        fail="$(grep -q "^FAIL:$id\$"    "$LOGFILE" && echo t)"
+    eval "$task" "$@" 2> "$logfile"
+    exitcode=$?
 
-        if [ -n "$SHPLUG_DEBUG""$succ" ] || [ -n "$fail" ] ; then
-            [ -n "$succ" ] && { stat=succeded color="$GRN"; }
-            [ -n "$fail" ] && { stat=failed   color="$RED"; }
+    return "$exitcode"
 
-            printf '%s(%s) %s %s:%s\n' \
-                "$color"               \
-                "$id"                  \
-                "$short_path"          \
-                "$stat"                \
-                "$RST"
+    #OUT="sed_unbuf 's/^/$id	stat	/'"          \
+    #ERR="sed_unbuf 's/^/$id	/'"                  \
+        #fd_apply                                 \
+            #eval "$task" "$@"               "&&" \
+            #echo "SUCCESS:$id" ">>$LOGFILE" "||" \
+            #echo "FAIL:$id"    ">>$LOGFILE"      \
+        #2>>"$LOGFILE"
 
+    #{
+        #short_path="$(entry_get short)"
+        #succ="$(grep -q "^SUCCESS:$id\$" "$LOGFILE" && echo t)"
+        #fail="$(grep -q "^FAIL:$id\$"    "$LOGFILE" && echo t)"
 
-            sed -n 's/'"$id"'	\(.*\)/	\1/p' < "$LOGFILE"
+        #if [ -n "$SHPLUG_DEBUG""$succ" ] || [ -n "$fail" ] ; then
+            #[ -n "$succ" ] && { stat=succeded color="$GRN"; }
+            #[ -n "$fail" ] && { stat=failed   color="$RED"; }
 
-        fi
+            #printf '%s(%s) %s %s:%s\n' \
+                #"$color"               \
+                #"$id"                  \
+                #"$short_path"          \
+                #"$stat"                \
+                #"$RST"
 
-    } | sed "s/^/$id	log	/"
+            #sed -n 's/'"$id"'	\(.*\)/	\1/p' < "$LOGFILE"
+        #fi
+    #} | sed "s/^/$id	log	/"
 }
 
 run() {
-    rm -rf "$SHPLUG_DIR/tmp/*"
-    mkdir -p "$SHPLUG_SRC"
-    mkdir -p "$SHPLUG_DIR/tmp/"
-
-    queuefile="$SHPLUG_DIR/queue"
-    logfile="$SHPLUG_DIR/log"
-    touch "$queuefile"
-    # rm -f "$logfile"
-    # touch "$logfile"
-    printf '' >"$logfile"
-
     task=$1; shift
-    max_id=$(wc -l "$queuefile" | cut -d' ' -f1)
 
-    for _ in $(seq 1 "$max_id"); do
-        printf '\n'
+    # find creates a list of every entry inside the db,
+    # since every entry is a file named ENTRY.
+    entry_list="$(find "$SHPLUG_DB" -type f -name 'ENTRY')"
+    max_ln="$(echo "$entry_list" | wc -l)"
+
+    # allocate a new line for each entry
+    i=0
+    while [ "$i" -lt "$max_ln" ]; do
+        i=$(( i + 1 ))
+        echo
     done
+    unset i
 
+    echo "$entry_list" |
+    nl -b a -n ln |
     {
-        i=0
-        while read -r entry; do
-            i=$((i+1))
-
-            # ENTRY="$(sed -n "${i}p" "$queuefile")" \
-            ENTRY="$entry"         \
-            LOGFILE="$logfile"     \
-            QUEUEFILE="$queuefile" \
-                task "$i" "$task" "$@" &
-
-        done <<-EOF
-        $(cat "$queuefile")
-EOF
+        # Begin a subprocess for each entry.
+        # Piping makes synchronisation easy.
+        while read -r ln entry; do
+            # Prefix the output of task with the line number
+            # followed by a tab character.
+            ENTRY="$entry" \
+                task "$task" "$@" |
+                sed_unbuf "s/^/$ln	/"&
+        done
     } | {
         log_len=0
+
         padding=1
-        # for _ in $(seq 1 $padding); do printf '\n'; done
-        printf -- '  ────────────────\n'
+        printf -- '  ────────────────\n' # padding
 
-        while IFS='	' read -r line; do
-            id="$(echo "$line" | cut -f1)"
-            mode="$(echo "$line" | cut -f2)"
-            msg="$(echo "$line" | cut -f3-)"
+        # IFS is a tab character.
+        while IFS='	' read -r ln msg; do
+            ENTRY="$(echo "$entry_list" | head -n "$ln" | tail -n 1)"
 
-            if [ "$mode" = stat ]; then
-                ENTRY="$(sed -n "${id}p" "$queuefile")"
+            short_path="$(entry_get short)"
 
-                short_path="$(entry_get short)"
+            cur_stat="$(
+                printf '(%s/%s) %-20s\t%s' \
+                    "$ln"                   \
+                    "$max_ln"               \
+                    "$short_path"           \
+                    "$msg"                  \
+            )"
 
-                cur_stat="$(
-                    printf "(%s/%s) %-20s	%s" \
-                        "$id"                   \
-                        "$max_id"               \
-                        "$short_path"           \
-                        "$msg"                  \
-                    )"
+            lines_up=$(((max_ln + 1 - ln) + padding + log_len))
 
-                lines_up=$(((max_id + 1 - id) + padding + log_len))
+            printf "%s" "$(
+                cursor up "$lines_up"
+                cursor clear line
+                printf "%s" "$cur_stat"
+                cursor home
+                cursor down "$lines_up"
+            )"
 
-                printf "%s" \
-                    "$(
-                        cursor up $lines_up
-                        cursor clear line
-                        printf "%s" "$cur_stat"
-                        # cursor clear end
-                        cursor home
-                        cursor down $lines_up
-                    )"
+            #id="$(echo "$line" | cut -f1)"
+            #mode="$(echo "$line" | cut -f2)"
+            #msg="$(echo "$line" | cut -f3-)"
 
-            elif [ "$mode" = log ]; then
-                ENTRY="$(sed -n "${id}p" "$queuefile")"
-                printf '%s: %s\n' "$(entry_get rename-to)" "$msg"
-                log_len=$((log_len + 1))
-            fi
+            #if [ "$mode" = stat ]; then
+                #ENTRY="$(sed -n "${id}p" "$queuefile")"
+
+                #short_path="$(entry_get short)"
+
+                #cur_stat="$(
+                    #printf "(%s/%s) %-20s	%s" \
+                        #"$id"                   \
+                        #"$max_id"               \
+                        #"$short_path"           \
+                        #"$msg"                  \
+                #)"
+
+                #lines_up=$(((max_id + 1 - id) + padding + log_len))
+
+                #printf "%s" \
+                    #"$(
+                        #cursor up $lines_up
+                        #cursor clear line
+                        #printf "%s" "$cur_stat"
+                        ## cursor clear end
+                        #cursor home
+                        #cursor down $lines_up
+                    #)"
+
+            #elif [ "$mode" = log ]; then
+                #ENTRY="$(sed -n "${id}p" "$queuefile")"
+                #printf '%s: %s\n' "$(entry_get rename-to)" "$msg"
+                #log_len=$((log_len + 1))
+            #fi
         done
     }
 }
@@ -620,26 +556,14 @@ case "$1" in
         shift 1
         run "$@"
         ;;
+    load)
+        err 'Unimplemented'; exit 1
+        ;;
     clean)
-        rm -rf "$SHPLUG_SRC"
+        err 'Unimplemented'; exit 1
         ;;
     *)
         register "$@"
         ;;
 esac
-
-# if [ "$1" = "load" ]; then
-#     if ! have git; then
-#         err "command: \`git\` is missing!"
-#         exit 1
-#     fi
-#     shift 1
-#     load "$*"
-# else
-#     register "$*"
-# fi
-
-
-
-
 
